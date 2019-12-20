@@ -1,0 +1,189 @@
+---
+title: "Credit Card Fraud Detection"
+Name: "Rohan Deshmukh"
+output: html_notebook
+---
+
+```{r Preprocessing}
+## Installing and loading required packages
+if(!require(corrplot)){install.packages("corrplot")}
+if(!require(survival)){install.packages("survival")}
+if(!require(randomForest)){install.packages("randomForest")}
+if(!require(pROC)){install.packages("pROC")}
+if(!require(caret)){install.packages("caret")}
+if(!require(lattice)){install.packages("lattice")}
+if(!require(lattice)){install.packages("dplyr")}
+if(!require(DMwR)){install.packages("DMwR")}
+#if(!require(mcbiopi)){install.packages("mcbiopi")}
+
+library(corrplot)
+library(survival)
+library(randomForest)
+library(pROC)
+library(data.table)
+library(caret)
+library(lattice)
+library(dplyr)
+library(DMwR)
+#library(mcbiopi)
+
+## Reading input files
+creditdata <- fread("/Users/rohandeshmukh/Desktop/creditcard.csv",data.table=FALSE)
+
+## Checking for NA values
+sum(is.na(creditdata))
+
+## Understanding the data
+str(creditdata)
+summary(creditdata)
+head(creditdata, 10)
+
+## Plotting correlation plot
+correlation <- cor(creditdata,method="pearson")
+corrplot(correlation, tl.cex=0.8,tl.col = "black")
+
+## Factor the dependent variable
+creditdata$Class <- as.factor(creditdata$Class)
+table(creditdata$Class)
+
+## Data prep for anomaly detection graph
+ADdata<- data.frame(creditdata)
+skew <- sum(as.numeric(ADdata$Class))/nrow(ADdata)
+sprintf('Percentage of fraudulent transactions in the data set %f', skew*100)
+
+rownames(ADdata) <- 1:nrow(ADdata)
+Nonfraud <- ADdata[ADdata$Class == 0,]
+Fraud <- ADdata[ADdata$Class == 1,]
+skew <- sum(as.numeric(ADdata$Class))/nrow(ADdata)
+
+good <- apply(Nonfraud[sample(rownames(Nonfraud), size = as.integer(skew *nrow(ADdata)), replace = T), -c(1, 30, 31)], 2, mean)
+fraud <- apply(Fraud[, -c(1, 30, 31)], 2, mean)
+plot(fraud, col = "red", xlab = "Features", ylab = "Mean")
+lines(fraud, col = "red", lwd = 2)
+points(good, col = "green")
+lines(good, col = "green", lwd = 2)
+legend("topright", legend = c("Non Anomalous", "Anomalous"), lty = c(1,1), col = c("green", "red"), lwd = c(2,2))
+
+## Now we will group the datas based on the Class value and 
+creditcardDF <- creditdata %>% group_by(Class) %>% summarize(Class_count = n())
+
+## Finding the percentage of each Class category.
+creditcardDF$Class_count <- 100 * creditcardDF$Class_count / nrow(creditdata)
+creditcardDF$ncount_p <- paste(round(creditcardDF$Class_count,2),"%")
+
+ggplot(creditcardDF,aes(x=Class,y=Class_count,fill=Class)) +
+  geom_bar(stat="identity") + geom_text(aes(label=ncount_p),vjust = -0.7) +
+    ggtitle("Transaction by status") + xlab("Class") + ylab("Percentage of transaction")
+
+## Splitting data into train and test set
+set.seed(7)
+nrows <- nrow(creditdata)
+split_index <- sample(1:nrow(creditdata), 0.7 * nrow(creditdata))
+
+traindata <- creditdata[split_index,]
+testdata <- creditdata[-split_index,]
+summary(traindata)
+summary(testdata)
+```
+
+
+```{r Logistic Regression}
+#Training data on Logistic regression algorithm
+ctrl <- trainControl(method = "cv", number = 5)
+glmmodel <- train(as.factor(Class) ~.-Amount-Time , data = traindata, method = "glm", trControl = ctrl)
+#summary(glmmodel)
+
+#Predict on testing data
+predictors <- names(traindata)[names(traindata) != 'Class']
+predglm <- predict(glmmodel, testdata)
+summary(predglm)
+
+#Confusion matrix and AUC
+confusionMatrix(predglm, testdata$Class)
+aucglm <- roc(as.numeric(testdata$Class), as.numeric(predglm),  ci=TRUE)
+plot(aucglm, ylim=c(0,1), print.thres=TRUE, main=paste('Logistic Regression AUC:',round(aucglm$auc[[1]],3)),col = 'blue')
+aucglm
+```
+
+
+```{r Finding optimal value of mtry for Random forest algorithm}
+## Using For loop to identify the right mtry for model
+a=c()
+i=5
+for (i in 3:8) {
+  model <- randomForest(y = traindata[, 31], x = traindata[, -c(1,31)], ntree = 10, mtry = i, importance=T, do.trace = 10)
+  predValid <- predict(model, testdata, type = "class")
+  a[i-2] = mean(predValid == testdata$Class)
+}
+a
+plot(3:8, a, xlab = "Value of mtry variable", ylab = "Accuracy of RF")
+```
+
+
+```{r Random Forest}
+## Training data on Random forest algorithm
+rfmodel <- randomForest(y = traindata[, 31], x = traindata[, -c(1,31)], ntree = 50, mtry = 5, importance=T, do.trace = 10)
+plot(rfmodel)
+
+## Predict on testing data using Random forest model
+predrf <- predict(rfmodel, testdata)
+
+## Confusion matrix and AUC for Random forest model
+confusionMatrix(predrf,testdata$Class)
+aucrf <- roc(as.numeric(testdata$Class), as.numeric(predrf),  ci=TRUE)
+plot(aucrf, ylim=c(0,1), print.thres=TRUE, main=paste('Random Forest AUC:',round(aucrf$auc[[1]],3)),col = 'blue')
+```
+
+
+```{r SVM}
+ctrl <- trainControl(method = "cv", number = 10)
+svmmodel <- train(as.factor(Class) ~.-Amount-Time, data = traindata)
+summary(svmmodel)
+
+#Predict on testing data
+predsvm <- predict(svmmodel,testdata)
+summary(predsvm)
+
+#Confusion matrix and AUC
+confusionMatrix(predsvm,testdata$Class)
+aucsvm <- roc(as.numeric(testdata$Class), as.numeric(predsvm),  ci=TRUE)
+plot(aucsvm, ylim=c(0,1), print.thres=TRUE, main=paste('SVM AUC:',round(aucsvm$auc[[1]],3)),col = 'blue')
+aucsvm
+```
+
+
+```{r RF feature engineering}
+rfmodel2 <- randomForest(as.factor(Class) ~.-Amount-Time-V24-V22, data = traindata, ntree=50, mtry = 5, importance=T,  do.trace = 10)
+plot(rfmodel2)
+importance(rfmodel2)
+
+predrf2 <- predict(rfmodel2,testdata)
+
+confusionMatrix(predrf2,testdata$Class)
+aucrf2 <- roc(as.numeric(testdata$Class), as.numeric(predrf2),  ci=TRUE)
+plot(aucrf2, ylim=c(0,1), print.thres=TRUE, main=paste('Random Forest AUC:',round(aucrf2$auc[[1]],3)),col = 'blue')
+```
+
+
+```{r RF feature engineering with SMOTE}
+smote_sample_train_data <- SMOTE(Class ~.-Amount-Time, data = traindata, perc.over = 100, perc.under=200)
+print('Number of transactions in train dataset after applying SMOTE sampling method')
+print(table(smote_sample_train_data$Class))
+smote_classifier = glm(formula = Class ~ ., family = binomial, data = smote_sample_train_data)
+
+smote_probability_predict = predict(smote_classifier, type = 'response', newdata = testdata[-31])
+y_pred_smote = ifelse(smote_probability_predict>0.5, 1, 0)
+roc_smote <- roc(testdata$Class, y_pred_smote)
+print(roc_smote)
+
+rfmodel3 <- randomForest(as.factor(Class) ~.-Amount-Time-V24 - V22, data = smote_sample_train_data, ntree=50, mtry = 5, importance=T,  do.trace = 10)
+plot(rfmodel3)
+importance(rfmodel3)
+
+predrf3 <- predict(rfmodel3,testdata)
+
+confusionMatrix(predrf3,testdata$Class)
+aucrf3 <- roc(as.numeric(testdata$Class), as.numeric(predrf3),  ci=TRUE)
+plot(aucrf3, ylim=c(0,1), print.thres=TRUE, main=paste('Random Forest AUC:',round(aucrf3$auc[[1]],3)),col = 'blue')
+```
+
